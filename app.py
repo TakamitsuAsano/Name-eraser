@@ -9,7 +9,8 @@ from docx import Document
 IGNORE_LIST = [
     '参加者', '話者', '詳細', 'まとめ', '日時', 'Source', 'source', '文字起こし', 'メモ', '長さ', 'Time', 'Unknown',
     'ENG', 'JPN', 'ENG/JPN', 'ENG_JPN', 'JST', 'Gemini', 'によるメモ', 'のコピー', '標準', 'インタビュー', '対象者',
-    '会議の録画', '招待済み', '添付ファイル', 'mp4', 'm4a', 'wav', 'docx', 'txt', 'pdf', 'com', 'jp', 'ac'
+    '会議の録画', '招待済み', '添付ファイル', 'mp4', 'm4a', 'wav', 'docx', 'txt', 'pdf', 'com', 'jp', 'ac',
+    'Speaker', '筑波大学'
 ]
 
 def is_valid_name(name):
@@ -21,15 +22,19 @@ def is_valid_name(name):
         return False
     if clean_name.isdigit(): 
         return False
+    
     # 除外リストに含まれるかチェック（大文字小文字無視）
     for ignore in IGNORE_LIST:
+        # 完全一致チェック
         if ignore.lower() == clean_name.lower():
             return False
-        # 日付形式の除外
+        # Speaker_A のような既存の置換ネームも除外
+        if "speaker" in clean_name.lower():
+            return False
+            
+        # 日付形式の除外 (数字と記号の混在)
         if re.search(r'\d', clean_name) and re.search(r'[\/\-_]', clean_name):
-            # ただしメールアドレスに含まれる数字や記号は許可したいので、
-            # @が含まれている場合は日付判定をスキップして有効とする
-            if '@' not in clean_name:
+            if '@' not in clean_name: # メアドは許可
                 return False
     return True
 
@@ -37,37 +42,52 @@ def extract_names(text, filename=""):
     """テキストとファイル名から名前・メールアドレス候補をすべて抽出する"""
     potential_names = set()
 
-    # 1. メールアドレスの抽出 (最優先)
-    # 本文とファイル名からメアド形式を探す
+    # 1. イニシャル付きの名前パターン (最優先追加)
+    # 例: R.Okuzumi, X.Su, H.Sakai
+    # [大文字1文字] [ドット] [大文字] [英字1文字以上]
+    pattern_initial = r'\b[A-Z]\.[A-Z][a-zA-Z]+'
+    matches_initial_text = re.findall(pattern_initial, text)
+    matches_initial_file = re.findall(pattern_initial, filename)
+    potential_names.update(matches_initial_text)
+    potential_names.update(matches_initial_file)
+
+    # 2. メールアドレス
     pattern_email = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
     matches_email_text = re.findall(pattern_email, text)
     matches_email_file = re.findall(pattern_email, filename)
     potential_names.update(matches_email_text)
     potential_names.update(matches_email_file)
 
-    # 2. 本文中の '名前: ' パターン
+    # 3. 本文中の '名前: ' パターン
     pattern_colon = r'(?:^|\n)(?:\[.*?\]\s*)?([^\n\r：:]{2,20}?)\s*[:：]'
     matches_colon = re.findall(pattern_colon, text)
     potential_names.update(matches_colon)
 
-    # 3. ファイル名やヘッダーにある括弧内の文字列
+    # 4. ファイル名やヘッダーにある括弧内の文字列
+    # 括弧の中身を取り出し、さらに " - " 等で分割して評価する
     base_name = os.path.splitext(filename)[0]
     search_target = base_name + "\n" + text[:500] 
-    pattern_bracket = r'[（\(]([^）\)\n\r]{2,20}?)[）\)]'
+    pattern_bracket = r'[（\(]([^）\)\n\r]+?)[）\)]'
     matches_bracket = re.findall(pattern_bracket, search_target)
-    potential_names.update(matches_bracket)
-
-    # 4. 特定パターンの補足
-    if "H.Sakai" in search_target:
-        potential_names.add("H.Sakai")
+    
+    for content in matches_bracket:
+        # 括弧の中身を区切り文字で分割してみる (例: "Speaker_C - R.Okuzumi")
+        parts = re.split(r'[\s\-_/]+', content)
+        # 分割前の全体も候補に入れる
+        potential_names.add(content)
+        # 分割後のパーツも候補に入れる
+        for p in parts:
+            potential_names.add(p)
 
     # フィルタリング
     unique_names = set()
     for name in potential_names:
-        if is_valid_name(name):
-            unique_names.add(name.strip())
+        # 記号を除去して純粋な名前部分だけでチェック
+        clean = name.strip(" -_")
+        if is_valid_name(clean):
+            unique_names.add(clean)
     
-    # 名前が長い順にソート（重要：メールアドレスのように長い文字列を先に置換するため）
+    # 名前が長い順にソート
     return sorted(list(unique_names), key=len, reverse=True)
 
 def generate_name_map(names):
@@ -82,7 +102,6 @@ def generate_name_map(names):
     return name_map
 
 def process_content(content, filename):
-    """テキスト内容とファイル名を受け取り、置換後の内容と新しいファイル名を返す"""
     names = extract_names(content, filename)
     name_map = generate_name_map(names)
 
@@ -159,11 +178,13 @@ def process_docx_file(file_obj):
     return new_filename, output_stream.getvalue()
 
 # --- アプリ画面 ---
-st.title("🕵️ 文字起こし匿名化ツール v3")
+st.title("🕵️ 文字起こし匿名化ツール v4")
 st.markdown("""
 以下の情報を一括で `Speaker_X` 等に変換します。
-* **名前**（本文中の「名前:」やファイル名の括弧内）
-* **メールアドレス**（本文やヘッダーに含まれるもの）
+* **名前**（会話の「名前:」）
+* **英字氏名**（`R.Okuzumi`, `X.Su` など）
+* **メールアドレス**
+* **ファイル名の括弧内の氏名**
 
 対応形式: `.txt`, `.md`, `.csv`, `.docx`
 """)
@@ -193,4 +214,4 @@ if uploaded_files:
                 progress_bar.progress((i + 1) / len(uploaded_files))
         
         st.success(f"完了！ {processed_count} / {len(uploaded_files)} ファイル処理済み")
-        st.download_button("📦 ZIPをダウンロード", zip_buffer.getvalue(), "anonymized_v3.zip", "application/zip")
+        st.download_button("📦 ZIPをダウンロード", zip_buffer.getvalue(), "anonymized_v4.zip", "application/zip")
